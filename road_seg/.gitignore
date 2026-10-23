@@ -1,0 +1,17 @@
+# дані організаторів і похідні — не викладаємо
+data/
+*.zip
+*.mp4
+*.avi
+*.mov
+*.jpg
+*.png
+results/
+# моделі (великі файли) — окремо через GitHub Releases
+models/
+*.pt
+# середовище
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
