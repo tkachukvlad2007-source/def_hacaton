@@ -49,8 +49,9 @@ def build_model(encoder="mobilenet_v2", pretrained=True):
                     in_channels=3, classes=1)
 
 
-def augment(g, m, rng):
-    """Аугментація під нічну ІЧ-камеру на трясучій платформі."""
+def augment(g, m, rng, weather=0.0):
+    """Аугментація під нічну ІЧ-камеру на трясучій платформі.
+    weather — імовірність додати погану погоду (засвітка, дощ, туман, темрява; див. weather.py)."""
     h, w = g.shape
     if rng.random() < 0.5:
         g, m = g[:, ::-1], m[:, ::-1]
@@ -77,13 +78,16 @@ def augment(g, m, rng):
         else:
             ker[:, k // 2] = 1.0
         f = cv2.filter2D(f, -1, ker / k)
+    if rng.random() < weather:
+        from weather import add_weather
+        f = add_weather(f, rng)
     f = np.clip(f + rng.normal(0, rng.uniform(0, 0.05), f.shape), 0, 1)
     return (f * 255).astype(np.uint8), m
 
 
 class RoadDataset(torch.utils.data.Dataset):
-    def __init__(self, pairs, size, train):
-        self.pairs, self.size, self.train = pairs, tuple(size), train
+    def __init__(self, pairs, size, train, weather=0.0):
+        self.pairs, self.size, self.train, self.weather = pairs, tuple(size), train, weather
 
     def __len__(self):
         return len(self.pairs)
@@ -95,7 +99,7 @@ class RoadDataset(torch.utils.data.Dataset):
         g = cv2.resize(g, self.size, interpolation=cv2.INTER_AREA)
         m = cv2.resize(m, self.size, interpolation=cv2.INTER_NEAREST)
         if self.train:
-            g, m = augment(g, m, np.random.default_rng())
+            g, m = augment(g, m, np.random.default_rng(), self.weather)
         return preprocess(g, self.size), torch.from_numpy((m > 127).astype(np.float32))[None]
 
 
@@ -140,6 +144,8 @@ def main():
     ap.add_argument("--size", type=int, nargs=2, default=[512, 288], help="ширина висота (кратні 32)")
     ap.add_argument("--encoder", default="mobilenet_v2")
     ap.add_argument("--workers", type=int, default=2)
+    ap.add_argument("--weather", type=float, default=0.0,
+                    help="імовірність аугментації поганою погодою (0.4 — стійкіша до засвітки й дощу)")
     a = ap.parse_args()
 
     if a.size[0] % 32 or a.size[1] % 32:
@@ -168,7 +174,7 @@ def main():
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Пристрій: {dev}" + ("" if dev == "cuda" else "  (без GPU буде повільно)"))
-    dl_tr = torch.utils.data.DataLoader(RoadDataset(tr, a.size, True), batch_size=a.batch, shuffle=True,
+    dl_tr = torch.utils.data.DataLoader(RoadDataset(tr, a.size, True, a.weather), batch_size=a.batch, shuffle=True,
                                         num_workers=a.workers, drop_last=len(tr) > a.batch)
     dl_va = torch.utils.data.DataLoader(RoadDataset(va, a.size, False), batch_size=a.batch, num_workers=a.workers)
     model = build_model(a.encoder, pretrained=True).to(dev)
@@ -198,7 +204,7 @@ def main():
         if iou > best:
             best = iou
             torch.save({"state": model.state_dict(), "encoder": a.encoder, "size": list(a.size),
-                        "iou": best, "val_videos": sorted(val_v)}, a.out)
+                        "iou": best, "val_videos": sorted(val_v), "weather": a.weather}, a.out)
             mark = "  <- збережено"
         print(f"епоха {ep:3d}/{a.epochs}  loss {tot / max(n, 1):.4f}  IoU перевірки {iou:.3f}  "
               f"({time.time() - t0:.0f} с){mark}", flush=True)

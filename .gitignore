@@ -1,0 +1,15 @@
+# дані, відео, моделі й результати — не в git (великі файли)
+data/
+*.zip
+*.mp4
+*.avi
+*.pt
+*.npz
+*.jpg
+*.png
+results/
+results_*/
+train_log.txt
+__pycache__/
+*.pyc
+.venv/

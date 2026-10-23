@@ -69,17 +69,28 @@ def road_geometry(mask):
     width_b = right[0] - left[0]
     return dict(rows=rows, left=left, right=right, coef=c,
                 width=width_b / w,                                    # ширина дороги внизу, частка кадру
-                offset=(w / 2 - xb) / max(width_b, 1),                # >0: машина лівіше центру дороги
+                offset=(w / 2 - xb) / max(width_b, 1),                # >0: центр дороги лівіше, тобто машина правіше центру
                 angle=math.degrees(math.atan2(xt - xb, max(yb - yt, 1))))  # >0: дорога йде праворуч
 
 
-def confidence(p, mask_prev, mask):
+def glare_factor(gray):
+    """Штраф за засвітку (фари, ліхтар): частка пересвічених пікселів у нижніх 2/3 кадру.
+    На звичайних нічних відео її < 2% (рідко до ~15%), під фарами — 40%+. Модель при цьому може бути
+    «впевнена», хоча дороги під плямою не видно, тому штраф рахуємо з самого кадру.
+    До 10% — без штрафу, від 35% — впевненість 0."""
+    sat = float(np.mean(gray[gray.shape[0] // 3:] >= 245))
+    return float(np.clip(1 - (sat - 0.10) / 0.25, 0, 1))
+
+
+def confidence(p, mask_prev, mask, gray=None):
     """Впевненість кадру 0..1: наскільки ймовірності близькі до 0/1 у зоні дороги та біля неї,
-    помножено на стабільність маски відносно попереднього кадру."""
+    помножено на стабільність маски відносно попереднього кадру і на штраф за засвітку."""
     zone = cv2.dilate(mask.astype(np.uint8), np.ones((25, 25), np.uint8)) > 0
     if zone.sum() < 50:
         return 0.0
     certainty = float(np.mean(np.abs(2 * p[zone] - 1)))
+    if gray is not None:
+        certainty *= glare_factor(gray)
     if mask_prev is None:
         return certainty
     inter = np.logical_and(mask, mask_prev).sum()
@@ -163,7 +174,8 @@ def process(src, model, size, dev, a):
         prob = p if prob is None else a.smooth * prob + (1 - a.smooth) * p   # згладжування в часі
         mask = keep_road(cv2.resize(prob, (w, h)) > a.thr)
         g = road_geometry(mask)
-        c = confidence(cv2.resize(p, (w, h)), prev_mask, mask)     # по сирому кадру, не згладженому
+        c = confidence(cv2.resize(p, (w, h)), prev_mask, mask,          # по сирому кадру, не згладженому
+                       cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY))
         conf_s = c if conf_s is None else 0.8 * conf_s + 0.2 * c
         prev_mask = mask
         confs.append(conf_s)
