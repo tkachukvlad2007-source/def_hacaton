@@ -196,7 +196,7 @@ def run(src, model, size, dev, a):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Симуляція автопілота НРК на відео")
+    ap = argparse.ArgumentParser(description="Симуляція автопілота наземного робота на відео")
     ap.add_argument("inputs", nargs="+")
     ap.add_argument("--model", default="models/road_seg_weather.pt")
     ap.add_argument("--out", default="results_drive")

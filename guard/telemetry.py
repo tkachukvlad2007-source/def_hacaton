@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Телеметрія НРК з логів поруч із відео (gps_log.txt, imu_log.txt):
+Телеметрія робота з логів поруч із відео (gps_log.txt, imu_log.txt):
 
   [VTG] <t> speed=<v> COG=<курс, град>          — GPS, 10 Гц
   [ATT] <t> Roll=.. Pitch=.. Yaw=<рад>          — IMU, ~22 Гц
@@ -47,7 +47,7 @@ class Telemetry:
         self.cog = np.radians(g[:, 1])
         yaw = np.unwrap(a[:, 2])
         d = np.diff(yaw)
-        d[np.abs(d) > np.radians(10)] = 0.0         # викиди гіроскопа (>10° за 44 мс = 230°/с — нереально для НРК)
+        d[np.abs(d) > np.radians(10)] = 0.0         # викиди гіроскопа (>10° за 44 мс = 230°/с — нереально для робота)
         self.yaw = np.concatenate([[yaw[0]], yaw[0] + np.cumsum(d)])
         self.sync = sync_g or sync_i
         if log_offset is not None:
