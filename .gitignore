@@ -13,3 +13,6 @@ train_log.txt
 __pycache__/
 *.pyc
 .venv/
+
+# локальне посилання на дані (symlink)
+road_seg/data

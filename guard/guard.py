@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Супервізор «круїз + охорона»: зменшує навантаження на оператора.
+Супервізор «круїз + виявлення дронів»: зменшує навантаження на оператора.
 
   MANUAL  — керує оператор. Якщо ділянка спокійна (дорога видна, поворот плавний, картинка змінюється
             мало) calm_s секунд поспіль — сам вмикає CRUISE і повідомляє оператора.
@@ -61,6 +61,8 @@ class Guard:
         self.hold_s = 5.0
         self.events = []                              # (t, рівень, текст) — повідомлення оператору
         self.t = 0.0
+        # перешкоди на шляху (obstacles.obstacle_ahead): 0 чисто, 1 поруч — повільно, 2 на шляху — стоп
+        self.obs_level, self.obs_run, self.block_run, self.obs_clear = 0, 0, 0, 0
 
     def say(self, level, text):
         self.events.append((self.t, level, text))
@@ -111,10 +113,12 @@ class Guard:
         self.track = (cx, cy, size)
         return (x2 - x1) * (y2 - y1) / (w * h), cx / w
 
-    def step(self, t, g, conf, dets, motion, link_ok, operator_takes=False, w=640, h=360, road_mask=None):
+    def step(self, t, g, conf, dets, motion, link_ok, operator_takes=False, w=640, h=360, road_mask=None,
+             obstacle=None):
         """Один кадр. dets — [(x1, y1, x2, y2, conf)], motion — середня зміна кадру (0..255),
         operator_takes — оператор узяв керування (в симуляції — за таймером або клавішею),
-        road_mask — маска дороги (bool HxW) для фільтра «об'єкт на землі»."""
+        road_mask — маска дороги (bool HxW) для фільтра «об'єкт на землі»,
+        obstacle — результат obstacles.obstacle_ahead() (level 0/1/2) або None, якщо перешкод не розпізнаємо."""
         self.t = t
         drone = self._drone(dets, w, h, road_mask)
         self.det_win.append(drone is not None)
@@ -219,6 +223,30 @@ class Guard:
             elif self.action == "DASH":
                 cmd["speed"] = 1.0
             self.drv.steer, self.drv.speed = cmd["steer"], cmd["speed"]
-        cmd["mode"] = self.mode + (f":{self.action}" if self.action else "")
+        obs_action = ""
+        if obstacle is not None:
+            lvl = obstacle["level"]
+            self.obs_run = self.obs_run + 1 if lvl >= 1 else 0
+            self.block_run = self.block_run + 1 if lvl == 2 else 0
+            self.obs_clear = self.obs_clear + 1 if lvl == 0 else 0
+            if self.block_run >= max(3, int(0.3 * self.fps)) and self.obs_level < 2:
+                self.obs_level = 2
+                self.say("alarm", "СТОП: перешкода на шляху. Візьміть керування")
+            elif self.obs_run >= int(0.5 * self.fps) and self.obs_level == 0:
+                self.obs_level = 1
+                self.say("warn", "Перешкоди біля дороги: сповільнення")
+            if self.obs_level and self.obs_clear >= int(1.5 * self.fps):
+                self.obs_level = 0
+                self.say("info", "Шлях вільний" + (", автопілот їде далі" if self.mode == "CRUISE" else ""))
+            if self.mode == "CRUISE" and not self.action:      # автопілот їде сам — реагуємо швидкістю
+                if self.obs_level == 2:
+                    cmd["speed"] = self.drv.speed = 0.0
+                    obs_action = "STOP_OBST"
+                elif self.obs_level == 1:
+                    cmd["speed"] = self.drv.speed = min(self.drv.speed, 0.5)
+                    obs_action = "SLOW_OBST"
+        act = self.action or obs_action
+        cmd["mode"] = self.mode + (f":{act}" if act else "")
         cmd["calm"] = calm
+        cmd["obstacle"] = self.obs_level
         return cmd

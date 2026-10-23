@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Демо «круїз + охорона» на відео: модель дороги + YOLO-детектор дронів + супервізор guard.Guard.
+Демо «круїз + виявлення дронів» на відео: модель дороги + YOLO-детектор дронів + супервізор guard.Guard.
 Дрони (прямокутники / силуети) накладаються програмно в задані моменти.
 
   python guard_sim.py ../../data/dev_0008.mp4 --start 200 --frames 1600 \
@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "road_seg"))
 from collect_drive import yaw_shift  # noqa: E402
 from drone_synth import Flight  # noqa: E402
 from guard import Guard  # noqa: E402
+from obstacles import Perception3, SynthObstacle, draw_classes, obstacle_ahead  # noqa: E402
 from telemetry import Telemetry, video_yaw_lk  # noqa: E402
 from seg_video import confidence, draw, keep_road, load_model, road_geometry, to_h264  # noqa: E402
 from train_seg import preprocess  # noqa: E402
@@ -67,12 +68,12 @@ class RouteMap:
         self.back = None                          # індекс у pts, по якому відступаємо назад
         self.head_fix = 0.0                       # поправка курсу після розворотів (телеметрія не знає про них)
 
-    def step(self, cmd, yaw, mode, action, threat_started, operator_took, real=None):
+    def step(self, cmd, yaw, mode, action, threat_started, operator_took, real=None, move=1.0):
         """yaw — виміряний з відео поворот камери за кадр (частка ширини кадру, >0 праворуч).
         real — (швидкість м/с, курс рад) з телеметрії GPS/IMU, якщо є: тоді рух машини по карті —
         справжній (стоїмо — стоїмо), а не з команд. Поки система їде по дорозі, напрямок беремо
         з телеметрії або з відео; розворот і відступ у відео нема — тоді інтегруємо команди системи."""
-        v = cmd["speed"] * self.v_scale
+        v = cmd["speed"] * self.v_scale * (move if real is None else 1.0)   # без телеметрії: стоїть картинка — стоїть карта
         if real is not None and action not in ("TURN", "RETREAT", "RESUME"):
             v = real[0]
             self.head = real[1] + self.head_fix
@@ -161,9 +162,13 @@ class RouteMap:
         return cv2.cvtColor(np.asarray(pil), cv2.COLOR_RGB2BGR)
 
 
-def render(fr, mask, g, conf, dets, cmd, guard, link_ok, t, font, real=None):
+def render(fr, mask, g, conf, dets, cmd, guard, link_ok, t, font, real=None, cls=None, obs=None, synth=None):
     h, w = fr.shape[:2]
     out = draw(fr, mask, g, None, conf, 0.6)
+    if cls is not None:
+        out = draw_classes(out, cls, obs)
+    if synth is not None:
+        out = synth.draw(out, g)
     mode = cmd["mode"].split(":")[0]
     col = MODE_COL[mode]
     if mode == "THREAT" and int(t * 4) % 2 == 0:            # миготлива червона рамка
@@ -188,7 +193,7 @@ def render(fr, mask, g, conf, dets, cmd, guard, link_ok, t, font, real=None):
     d = ImageDraw.Draw(img)
     names = {"MANUAL": "ОПЕРАТОР", "CRUISE": "АВТОПІЛОТ", "THREAT": "ЗАГРОЗА"}
     acts = {"TURN": "розворот", "RETREAT": "відступ", "DASH": "ривок уперед", "RESUME": "назад на маршрут",
-            "ALERT": "тривога оператору"}
+            "ALERT": "тривога оператору", "STOP_OBST": "стоп, перешкода", "SLOW_OBST": "перешкоди поруч, повільно"}
     a = cmd["mode"].split(":")[1] if ":" in cmd["mode"] else ""
     label = names[mode] + (f" · {acts[a]}" if a else "") + ("" if link_ok else " · НЕМА ЗВ'ЯЗКУ")
     tw = d.textlength(label, font=font)
@@ -207,7 +212,7 @@ def render(fr, mask, g, conf, dets, cmd, guard, link_ok, t, font, real=None):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Демо: круїз + охорона від дронів")
+    ap = argparse.ArgumentParser(description="Демо: круїз + виявлення дронів над маршрутом")
     ap.add_argument("video")
     ap.add_argument("--seg-model", default=os.path.join(HERE, "..", "road_seg", "models", "road_seg_weather.pt"))
     ap.add_argument("--det-model", default="/data/guard/runs/drone/weights/best.pt")
@@ -227,11 +232,16 @@ def main():
                     help="звідки курс для карти: GPS COG, гіроскоп IMU, зсув картинки, або злиття IMU+відео")
     ap.add_argument("--react", action="store_true", help="протидіяти дрону (ривок / розворот), а не лише тривожити")
     ap.add_argument("--hide", nargs="*", default=[], help="вшитий текст у кадрі, частки: x1:y1:x2:y2 ...")
+    ap.add_argument("--obstacles", nargs="*", default=[],
+                    help="симульовані перешкоди на шляху: T[:x] — з'являється на T с (x — положення, 0.5 = центр дороги); потрібні --mc-models")
+    ap.add_argument("--mc-models", nargs="*", default=None,
+                    help="моделі train_mc.py (3 класи): дорога + рослинність + перешкоди; автопілот гальмує перед перешкодами")
     a = ap.parse_args()
 
     from ultralytics import YOLO
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    seg, size = load_model(a.seg_model, dev)
+    perc = Perception3(a.mc_models, dev) if a.mc_models else None
+    seg, size = (None, None) if perc else load_model(a.seg_model, dev)
     det = YOLO(a.det_model)
     font = ImageFont.truetype(FONT, 15)
 
@@ -255,6 +265,11 @@ def main():
     wr = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (w + rmap.w, h))
 
     guard = Guard(fps=fps, det_conf=a.det_conf, react=a.react)
+    synths = []
+    for s in a.obstacles:
+        parts = s.split(":")
+        synths.append(SynthObstacle(float(parts[0]), w, h, float(parts[1]) if len(parts) > 1 else 0.5))
+    last_speed = 0.0
     hide = [tuple(float(v) for v in hb.split(":")) for hb in a.hide]
     takes = sorted(a.operator_takes)
     prob = prev_mask = conf_s = prev_g = prev_top = win = None
@@ -272,11 +287,24 @@ def main():
         if hide:
             fr = hide_overlay(fr, hide)
         gts = [b for b in (f.draw(fr, t) for f in flights) if b is not None]   # малюємо «дрон»
-        with torch.no_grad():
-            p = torch.sigmoid(seg(preprocess(fr, size)[None].to(dev)))[0, 0].float().cpu().numpy()
-        prob = p if prob is None else 0.5 * prob + 0.5 * p
-        mask = keep_road(cv2.resize(prob, (w, h)) > 0.5)
+        cls = obs = None
+        if perc is not None:
+            p, cls = perc(fr)                      # p — ймовірність дороги вже згладжена в часі
+            mask = keep_road(cls == 1)
+        else:
+            with torch.no_grad():
+                p = torch.sigmoid(seg(preprocess(fr, size)[None].to(dev)))[0, 0].float().cpu().numpy()
+            prob = p if prob is None else 0.5 * prob + 0.5 * p
+            mask = keep_road(cv2.resize(prob, (w, h)) > 0.5)
         g = road_geometry(mask)
+        synth_now = None
+        for so in synths:
+            so.step(t, last_speed, 1.0 / fps, guard.operator_has_control and guard.mode == "MANUAL" and t > so.t0 + 1.0)
+            if so.active and cls is not None:
+                cls = so.inject(cls, g)
+                synth_now = so
+        if cls is not None:
+            obs = obstacle_ahead(cls, mask, g, w, h)
         gray = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
         c = confidence(cv2.resize(p, (w, h)), prev_mask, mask, gray)
         conf_s = c if conf_s is None else 0.8 * conf_s + 0.2 * c
@@ -304,7 +332,9 @@ def main():
             if abs(rate_s) > 20 and abs(rate_s - expected) > 20 and not guard.operator_has_control:
                 take = True
                 guard.say("info", "Оператор керує: різкий поворот")
-        cmd = guard.step(t, g, conf_s, dets, motion, True, take, w, h, mask)
+        cmd = guard.step(t, g, conf_s, dets, motion, True, take, w, h, mask, obs)
+        last_speed = cmd["speed"]
+        move = float(np.clip((guard.motion_s - 1.5) / 2.5, 0.0, 1.0))   # картинка не рухається -> машина стоїть
 
         # статистика детекції (поріг як у супервізора)
         good = [d for d in dets if d[4] >= a.det_conf and not guard._on_ground(d, mask, w, h)]
@@ -338,8 +368,9 @@ def main():
                 imu_prev, prev_gray = imu_now, gray
                 head = head_int
             real = (tel.speed(tv), head)
-        rmap.step(cmd, yaw, mode_, action_, guard.threat_started, took, real)
-        vis = np.hstack([render(fr, mask, g, conf_s, good, cmd, guard, True, t, font, real), rmap.render(font, t)])
+        rmap.step(cmd, yaw, mode_, action_, guard.threat_started, took, real, move)
+        vis = np.hstack([render(fr, mask, g, conf_s, good, cmd, guard, True, t, font, real, cls, obs, synth_now),
+                         rmap.render(font, t)])
         wr.write(vis)
         if a.show:
             cv2.imshow("guard", vis)
